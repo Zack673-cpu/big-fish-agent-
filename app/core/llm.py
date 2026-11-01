@@ -50,6 +50,16 @@ class LLMClient:
 
     async def chat(self, messages: List[Dict[str, Any]]) -> str:
         """发送对话并返回回复文本。"""
+        message = await self.request(messages)
+        return str(message.get("content") or "").strip()
+
+    async def request(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> Dict[str, Any]:
+        """发送一次对话请求，返回原始 message（可能带 tool_calls）。"""
         if not self._api_key:
             raise LLMError("未配置 DEEPSEEK_API_KEY")
         payload: Dict[str, Any] = {
@@ -59,6 +69,9 @@ class LLMClient:
             "max_tokens": 1024,
             "stream": False,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
         error = "未知错误"
         for attempt in range(self._retries + 1):
             try:
@@ -71,8 +84,10 @@ class LLMClient:
                     continue
                 response.raise_for_status()
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                return str(content).strip()
+                message = data["choices"][0]["message"]
+                if not isinstance(message, dict):
+                    raise ValueError("message 不是对象")
+                return message
             except httpx.HTTPStatusError as exc:
                 raise LLMError(
                     f"DeepSeek 返回 HTTP {exc.response.status_code}：{_error_detail(exc.response)}"

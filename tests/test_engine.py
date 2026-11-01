@@ -1,18 +1,33 @@
 import asyncio
 import dataclasses
+import json
 
 from app.config import Settings
 from app.core.engine import Engine
 from app.core.llm import LLMError
 from app.core.memory import MemoryStore
+from app.core.search import SearchResult
 from app.onebot.events import Attachment, MessageEvent
 
 
 class FakeLLM:
-    def __init__(self, reply: str = "你好呀~") -> None:
+    def __init__(self, reply: str = "你好呀~", tool_calls=(), tools_error=None) -> None:
         self.reply = reply
+        self.tool_calls = list(tool_calls)
+        self.tools_error = tools_error
         self.calls = 0
+        self.tool_requests = 0
         self.messages: list = []
+
+    async def request(self, messages, tools=None, tool_choice="auto"):
+        self.calls += 1
+        self.messages = messages
+        if tools and self.tools_error:
+            raise self.tools_error
+        if tools and self.tool_calls:
+            self.tool_requests += 1
+            return {"role": "assistant", "content": "", "tool_calls": self.tool_calls}
+        return {"role": "assistant", "content": self.reply}
 
     async def chat(self, messages):
         self.calls += 1
@@ -20,9 +35,68 @@ class FakeLLM:
         return self.reply
 
 
+def make_tool_call(query: str, call_id: str = "call_1") -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "arguments": json.dumps({"query": query}, ensure_ascii=False),
+        },
+    }
+
+
 class FailingLLM:
+    async def request(self, messages, tools=None, tool_choice="auto"):
+        raise LLMError("模拟失败")
+
     async def chat(self, messages):
         raise LLMError("模拟失败")
+
+
+class FakeSearch:
+    def __init__(self, results=(), error=None) -> None:
+        self.results = list(results)
+        self.error = error
+        self.queries: list = []
+
+    async def search(self, query):
+        self.queries.append(query)
+        if self.error:
+            raise self.error
+        return self.results
+
+
+class FakeLinks:
+    def __init__(self, text: str = "", error=None) -> None:
+        self.text = text
+        self.error = error
+        self.links: list = []
+
+    async def read_many(self, links):
+        self.links = list(links)
+        if self.error:
+            raise self.error
+        return self.text
+
+
+class FakeVoice:
+    def __init__(self, transcript: str = "", path=None, tts_enabled: bool = True) -> None:
+        self.transcript = transcript
+        self.path = path
+        self._tts_enabled = tts_enabled
+        self.texts: list = []
+
+    @property
+    def tts_enabled(self) -> bool:
+        return self._tts_enabled
+
+    async def transcribe(self, attachment):
+        return self.transcript
+
+    async def synthesize(self, text):
+        self.texts.append(text)
+        return self.path
 
 
 class FakeSender:
@@ -34,6 +108,12 @@ class FakeSender:
 
     async def send_private_msg(self, user_id, text):
         self.sent.append(("private", user_id, text, None))
+
+    async def send_group_record(self, group_id, file, quote_message_id=None):
+        self.sent.append(("group_record", group_id, file, quote_message_id))
+
+    async def send_private_record(self, user_id, file):
+        self.sent.append(("private_record", user_id, file, None))
 
 
 def make_settings() -> Settings:
@@ -72,11 +152,11 @@ def make_event(
     )
 
 
-async def prepare(tmp_path, llm=None):
+async def prepare(tmp_path, llm=None, search=None, voice=None):
     llm = llm or FakeLLM()
     memory = MemoryStore(tmp_path / "bot.db")
     await memory.initialize()
-    engine = Engine(make_settings(), memory, llm)
+    engine = Engine(make_settings(), memory, llm, search, voice=voice)
     return memory, engine, llm
 
 
@@ -347,6 +427,89 @@ async def _image_is_passed_as_multimodal_content(tmp_path, monkeypatch):
     assert any(part.get("type") == "image_url" for part in content)
 
 
+def test_tool_call_searches_and_feeds_results_back(tmp_path):
+    asyncio.run(_tool_call_searches_and_feeds_results_back(tmp_path))
+
+
+async def _tool_call_searches_and_feeds_results_back(tmp_path):
+    search = FakeSearch(
+        [
+            SearchResult(
+                title="今日新闻",
+                url="https://example.com/news",
+                summary="某地发布了新的出行政策。",
+                site_name="示例站",
+            )
+        ]
+    )
+    llm = FakeLLM(reply="我看到消息说……", tool_calls=[make_tool_call("Steam 下载榜 前十")])
+    memory, engine, llm = await prepare(tmp_path, llm=llm, search=search)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="下载前十名是哪些游戏"), sender)
+
+    assert search.queries == ["Steam 下载榜 前十"]
+    assert llm.tool_requests == 1
+    assert llm.calls == 2
+    assert any(message.get("role") == "tool" for message in llm.messages)
+    assert "某地发布了新的出行政策" in llm.messages[-1]["content"]
+    assert sender.sent
+
+
+def test_casual_chat_skips_web_search(tmp_path):
+    asyncio.run(_casual_chat_skips_web_search(tmp_path))
+
+
+async def _casual_chat_skips_web_search(tmp_path):
+    search = FakeSearch(
+        [SearchResult(title="新闻", url="https://example.com", summary="不该出现")]
+    )
+    memory, engine, llm = await prepare(tmp_path, search=search)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="今天好累啊"), sender)
+
+    assert search.queries == []
+    assert llm.calls == 1
+    assert "不该出现" not in llm.messages[0]["content"]
+
+
+def test_search_failure_does_not_break_reply(tmp_path):
+    asyncio.run(_search_failure_does_not_break_reply(tmp_path))
+
+
+async def _search_failure_does_not_break_reply(tmp_path):
+    search = FakeSearch(error=RuntimeError("搜索接口挂了"))
+    llm = FakeLLM(reply="没查到呢~", tool_calls=[make_tool_call("最近新闻")])
+    memory, engine, llm = await prepare(tmp_path, llm=llm, search=search)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="最近有什么新闻吗"), sender)
+
+    assert llm.calls == 2
+    assert sender.sent
+    assert "联网搜索结果" not in llm.messages[-1]["content"]
+
+
+def test_search_tool_unsupported_falls_back_to_keywords(tmp_path):
+    asyncio.run(_search_tool_unsupported_falls_back_to_keywords(tmp_path))
+
+
+async def _search_tool_unsupported_falls_back_to_keywords(tmp_path):
+    search = FakeSearch(
+        [SearchResult(title="新闻", url="https://example.com", summary="新闻摘要")]
+    )
+    llm = FakeLLM(reply="我查了下……", tools_error=LLMError("tools 不支持"))
+    memory, engine, llm = await prepare(tmp_path, llm=llm, search=search)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="最近有什么新闻吗"), sender)
+
+    assert search.queries == ["最近有什么新闻吗"]
+    assert "【联网搜索结果" in llm.messages[0]["content"]
+    assert "新闻摘要" in llm.messages[0]["content"]
+
+
 def poke_payload(**overrides) -> dict:
     payload = {
         "post_type": "notice",
@@ -402,6 +565,135 @@ async def _poke_other_target_also_replies(tmp_path):
 
     assert llm.calls == 1
     assert sender.sent and sender.sent[0][0] == "group"
+
+
+def test_voice_transcript_reaches_model(tmp_path):
+    asyncio.run(_voice_transcript_reaches_model(tmp_path))
+
+
+async def _voice_transcript_reaches_model(tmp_path):
+    memory, engine, llm = await prepare(tmp_path, voice=FakeVoice("今天好累呀"))
+    sender = FakeSender()
+    event = make_event(
+        text="",
+        has_media=True,
+        attachments=(Attachment("record", "语音", "https://example.com/a.amr"),),
+    )
+    await engine.handle(event, sender)
+
+    assert "[语音转文字]：今天好累呀" in llm.messages[-1]["content"]
+    rows = await memory.recent("private:10001", 10)
+    assert "[语音转文字]：今天好累呀" in rows[0]["content"]
+
+
+def test_voice_marker_sends_record(tmp_path):
+    asyncio.run(_voice_marker_sends_record(tmp_path))
+
+
+async def _voice_marker_sends_record(tmp_path):
+    llm = FakeLLM(reply="[语音] 晚安呀")
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    voice = FakeVoice(path="/tmp/voice.mp3")
+    engine = Engine(make_settings(), memory, llm, voice=voice)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="说句晚安"), sender)
+
+    assert voice.texts == ["晚安呀"]
+    assert sender.sent == [("private_record", 10001, "/tmp/voice.mp3", None)]
+    rows = await memory.recent("private:10001", 10)
+    assert rows[1]["content"] == "晚安呀"
+
+
+def test_voice_marker_falls_back_to_text(tmp_path):
+    asyncio.run(_voice_marker_falls_back_to_text(tmp_path))
+
+
+async def _voice_marker_falls_back_to_text(tmp_path):
+    llm = FakeLLM(reply="[语音] 晚安呀")
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    engine = Engine(make_settings(), memory, llm, voice=FakeVoice(path=None))
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="说句晚安"), sender)
+
+    assert sender.sent and sender.sent[0][0] == "private"
+    assert sender.sent[0][2] == "晚安呀"
+
+
+def test_voice_reply_disabled_keeps_text(tmp_path):
+    asyncio.run(_voice_reply_disabled_keeps_text(tmp_path))
+
+
+async def _voice_reply_disabled_keeps_text(tmp_path):
+    llm = FakeLLM(reply="[语音] 晚安呀")
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    engine = Engine(make_settings(), memory, llm, voice=FakeVoice(tts_enabled=False))
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="说句晚安"), sender)
+
+    assert sender.sent[0][0] == "private"
+    assert "【语音回复】" not in llm.messages[0]["content"]
+
+
+def test_link_context_injected_into_user_message(tmp_path):
+    asyncio.run(_link_context_injected_into_user_message(tmp_path))
+
+
+async def _link_context_injected_into_user_message(tmp_path):
+    links = FakeLinks("【链接内容（程序抓取的页面文字，可能不完整）】\n【B站视频】测试视频")
+    llm = FakeLLM()
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    engine = Engine(make_settings(), memory, llm, links=links)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="看看这个 https://b23.tv/AbCd12"), sender)
+
+    assert links.links == ["https://b23.tv/AbCd12"]
+    assert "【B站视频】测试视频" in llm.messages[-1]["content"]
+    assert "【链接内容的使用方式】" in llm.messages[0]["content"]
+
+
+def test_link_parse_disabled_skips_reader(tmp_path):
+    asyncio.run(_link_parse_disabled_skips_reader(tmp_path))
+
+
+async def _link_parse_disabled_skips_reader(tmp_path):
+    links = FakeLinks("不该出现")
+    settings = dataclasses.replace(make_settings(), link_parse_enabled=False)
+    llm = FakeLLM()
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    engine = Engine(settings, memory, llm, links=links)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="看看这个 https://b23.tv/AbCd12"), sender)
+
+    assert links.links == []
+    assert "不该出现" not in llm.messages[-1]["content"]
+
+
+def test_link_parse_failure_does_not_break_reply(tmp_path):
+    asyncio.run(_link_parse_failure_does_not_break_reply(tmp_path))
+
+
+async def _link_parse_failure_does_not_break_reply(tmp_path):
+    links = FakeLinks(error=RuntimeError("抓取挂了"))
+    llm = FakeLLM()
+    memory = MemoryStore(tmp_path / "bot.db")
+    await memory.initialize()
+    engine = Engine(make_settings(), memory, llm, links=links)
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="看看这个 https://b23.tv/AbCd12"), sender)
+
+    assert sender.sent
+    assert "【链接内容的使用方式】" not in llm.messages[0]["content"]
 
 
 def test_poke_self_is_ignored(tmp_path):

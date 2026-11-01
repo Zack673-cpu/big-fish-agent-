@@ -16,3 +16,8 @@ logs/
 # 编辑器
 .vscode/
 .idea/
+
+# 密钥文件
+*.pem
+*.key
+id_rsa*

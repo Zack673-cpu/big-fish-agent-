@@ -25,6 +25,24 @@ class Settings:
     llm_model: str = "deepseek-flash"
     llm_timeout: float = 60.0
 
+    web_search_enabled: bool = True
+    web_search_count: int = 3
+    web_search_timeout: float = 15.0
+
+    link_parse_enabled: bool = True
+    link_parse_timeout: float = 10.0
+    link_parse_max_links: int = 2
+
+    voice_asr_enabled: bool = True
+    voice_asr_key: str = ""
+    voice_asr_base_url: str = "https://api.siliconflow.cn/v1"
+    voice_asr_model: str = "FunAudioLLM/SenseVoiceSmall"
+    voice_asr_timeout: float = 30.0
+    voice_tts_enabled: bool = True
+    voice_tts_voice: str = "zh-CN-XiaoyiNeural"
+    voice_tts_timeout: float = 15.0
+    voice_tts_max_chars: int = 80
+
     onebot_host: str = "127.0.0.1"
     onebot_port: int = 8080
     onebot_path: str = "/onebot/v11/ws"
@@ -117,6 +135,21 @@ def load_settings() -> Settings:
         llm_base_url=_env("LLM_BASE_URL") or defaults.llm_base_url,
         llm_model=_env("LLM_MODEL") or defaults.llm_model,
         llm_timeout=_env_float("LLM_TIMEOUT", defaults.llm_timeout),
+        web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", defaults.web_search_enabled),
+        web_search_count=_env_int("WEB_SEARCH_COUNT", defaults.web_search_count),
+        web_search_timeout=_env_float("WEB_SEARCH_TIMEOUT", defaults.web_search_timeout),
+        link_parse_enabled=_env_bool("LINK_PARSE_ENABLED", defaults.link_parse_enabled),
+        link_parse_timeout=_env_float("LINK_PARSE_TIMEOUT", defaults.link_parse_timeout),
+        link_parse_max_links=_env_int("LINK_PARSE_MAX_LINKS", defaults.link_parse_max_links),
+        voice_asr_enabled=_env_bool("VOICE_ASR_ENABLED", defaults.voice_asr_enabled),
+        voice_asr_key=_env("SILICONFLOW_API_KEY"),
+        voice_asr_base_url=_env("VOICE_ASR_BASE_URL") or defaults.voice_asr_base_url,
+        voice_asr_model=_env("VOICE_ASR_MODEL") or defaults.voice_asr_model,
+        voice_asr_timeout=_env_float("VOICE_ASR_TIMEOUT", defaults.voice_asr_timeout),
+        voice_tts_enabled=_env_bool("VOICE_TTS_ENABLED", defaults.voice_tts_enabled),
+        voice_tts_voice=_env("VOICE_TTS_VOICE") or defaults.voice_tts_voice,
+        voice_tts_timeout=_env_float("VOICE_TTS_TIMEOUT", defaults.voice_tts_timeout),
+        voice_tts_max_chars=_env_int("VOICE_TTS_MAX_CHARS", defaults.voice_tts_max_chars),
         onebot_host=_env("ONEBOT_HOST") or defaults.onebot_host,
         onebot_port=_env_int("ONEBOT_PORT", defaults.onebot_port),
         onebot_path=_env("ONEBOT_PATH") or defaults.onebot_path,

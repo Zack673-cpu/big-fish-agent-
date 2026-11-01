@@ -2,3 +2,6 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 httpx>=0.27,<1.0
 python-dotenv>=1.0,<2.0
+# 语音：edge-tts 合成 mp3（免费、无需 Key）；pilk 解码 QQ 的 silk 语音
+edge-tts>=7.0,<8.0
+pilk>=0.2,<0.3

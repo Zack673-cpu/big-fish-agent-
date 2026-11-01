@@ -26,12 +26,30 @@ def test_split_text_short():
     assert split_text("你好呀~", 60, 3) == ["你好呀~"]
 
 
-def test_split_text_respects_limits():
+def test_split_text_merges_tail_instead_of_cutting():
     text = "啊" * 200
     segments = split_text(text, 60, 3)
     assert len(segments) == 3
-    assert all(len(segment) <= 60 for segment in segments)
+    assert all(len(segment) <= 60 for segment in segments[:2])
+    assert segments[-1] not in ("", "…")
+    assert "…" not in segments[-1]
+    assert len(segments[-1]) > 60
+
+
+def test_split_text_cuts_very_long_tail_at_sentence():
+    text = "啊" * 400
+    segments = split_text(text, 60, 3)
+    assert len(segments) == 3
+    assert len(segments[-1]) <= 181
     assert segments[-1].endswith("…")
+
+
+def test_split_text_long_tail_ends_with_sentence_punct():
+    text = "这是一句完整的话。" * 40
+    segments = split_text(text, 60, 3)
+    assert len(segments) == 3
+    assert segments[-1].endswith(("。", "…"))
+    assert "…" not in segments[-1] or len(segments[-1]) <= 181
 
 
 def test_split_text_keeps_paragraphs():

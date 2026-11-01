@@ -8,6 +8,9 @@
 - 表情、表情包和图片交给模型理解后生成回复（QQ 原生小表情以表情名传给模型）
 - 被双击头像「戳一戳」时由模型即兴回应；群里戳别人也会接一句
 - 语气参考《崩坏：星穹铁道》风堇，并从本地语料库检索片段注入提示词（RAG，不改模型权重）
+- 需要时效信息时自动联网搜索（DeepSeek 官方 Search API，复用同一个 Key），普通闲聊不会乱搜
+- 消息里带 B 站或网页链接时自动抓取内容：B 站取标题、UP主、简介、标签、热评和弹幕，普通网页取标题和正文摘要，交给模型参考
+- 能听懂别人发的语音（硅基流动 SenseVoice 转文字），也能自己决定用语音回答（Edge TTS 合成，免费无需 Key）
 - 按会话保存上下文，聊久了自动生成摘要，避免上下文越滚越大
 - `/remember` 长期记忆，`/reset` 清空当前会话上下文
 - 回复自动分段、限流，避免刷屏；大模型出错时有友好兜底
@@ -23,6 +26,9 @@ app/
   core/
     persona.py         大肥鱼人格与提示词
     llm.py             DeepSeek 接口封装
+    search.py          联网搜索（触发判断、结果整理）
+    link.py            链接解析（B 站视频信息、普通网页正文）
+    voice.py           语音识别（硅基流动）与语音合成（Edge TTS）
     memory.py          SQLite 存储（消息/摘要/长期记忆）
     text.py            文本清洗、别名识别、分段
     trigger.py         触发判断与限流
@@ -114,6 +120,20 @@ Copy-Item .env.example .env
 | `BOT_NAME` | 大肥鱼 | 机器人名字，写进人格提示 |
 | `BOT_ALIASES` | 大肥鱼,肥鱼 | 群聊触发别名，逗号分隔 |
 | `LLM_MODEL` | deepseek-flash | DeepSeek API 模型 id（显示名为 DeepSeek-V4.1-Flash） |
+| `WEB_SEARCH_ENABLED` | true | 是否自动联网搜索（复用 `DEEPSEEK_API_KEY`） |
+| `WEB_SEARCH_COUNT` | 3 | 每次最多取几条搜索结果（1-50） |
+| `WEB_SEARCH_TIMEOUT` | 15 | 搜索超时秒数，失败只记日志，不影响聊天 |
+| `LINK_PARSE_ENABLED` | true | 是否抓取消息里的 B 站/网页链接内容 |
+| `LINK_PARSE_TIMEOUT` | 10 | 单个链接抓取超时秒数，失败不影响聊天 |
+| `LINK_PARSE_MAX_LINKS` | 2 | 每条消息最多解析几个链接 |
+| `VOICE_ASR_ENABLED` | true | 是否把收到的语音转成文字（需要 `SILICONFLOW_API_KEY`） |
+| `SILICONFLOW_API_KEY` | 空 | 硅基流动 API Key，只用于语音识别；不填则听不了语音 |
+| `VOICE_ASR_MODEL` | FunAudioLLM/SenseVoiceSmall | 硅基流动的语音识别模型（官方标价免费） |
+| `VOICE_ASR_TIMEOUT` | 30 | 语音识别超时秒数，失败只记日志 |
+| `VOICE_TTS_ENABLED` | true | 是否允许机器人自己发语音（Edge TTS，无需 Key） |
+| `VOICE_TTS_VOICE` | zh-CN-XiaoyiNeural | 语音音色，默认「晓伊·温柔少女」 |
+| `VOICE_TTS_TIMEOUT` | 15 | 语音合成超时秒数，失败改发文字 |
+| `VOICE_TTS_MAX_CHARS` | 80 | 超过这个字数的回复不合成语音，直接发文字 |
 | `MAX_REPLY_CHARS` | 60 | 每段回复最大字数 |
 | `MAX_REPLY_SEGMENTS` | 3 | 一条回复最多分几段 |
 | `CONTEXT_MESSAGES` | 20 | 每次带给模型的历史消息条数 |
@@ -135,6 +155,56 @@ Copy-Item .env.example .env
 - 语气描述（温柔、先关心情绪、庭院/小伊卡意象）写在 `app/core/persona.py` 的 `HYACINE_STYLE`，不需要语料也能生效。
 - 不想启用检索：把 `KNOWLEDGE_FILE` 指向一个不存在的文件即可，程序不会报错，只是没有语料片段。
 - 图片识别会把图片内容发送给 DeepSeek；QQ 原生小表情没有图片文件，程序把表情名（如「/菜汪」）作为文字说明发给模型。介意图片上传的话，可以在 `app/core/engine.py` 的 `_build_llm_content` 里去掉图片下载逻辑。
+
+## 联网搜索
+
+程序把「联网搜索」注册成模型可调用的工具（`web_search`）：模型判断这条消息需要最新或实时信息时，自己调用 DeepSeek 官方 Search API（`POST /v1/tools/search`），程序把最多 `WEB_SEARCH_COUNT` 条网页摘要交回给模型，再让它用自己的话回答。
+
+- 什么时候搜：由模型自己决定。榜单排名、新闻、价格、票务、天气、赛事、新游戏、新版本、附近店铺这类问题会主动联网；常识、观点、情绪安慰和普通闲聊不搜，不会为了省事乱调工具。
+- 兜底：如果所用模型或接口不支持工具调用，程序会自动退回「关键词判断」的老办法（命中「搜一下/查一下/最新/新闻/官网/多少钱」或「时效词+疑问词」才搜），聊天不受影响。
+- 不用另外申请 Key：搜索接口和大模型共用 `DEEPSEEK_API_KEY`；按成功请求计费，官方价格 5 元/千次，失败、超时和搜索无结果都不扣费。
+- 结果只作参考：提示词要求模型概括网页内容、不整段照搬，网页里诱导它改变身份或泄露设定的文字会被忽略。
+- 隐私：搜索词会发送给 DeepSeek（和聊天内容一样），不会发给其他搜索厂商。
+- 不想用：在 `.env` 里设 `WEB_SEARCH_ENABLED=false` 并重启 `bigfish-bot`；搜索失败只写日志，聊天照常进行。
+- 想让兜底更宽/更窄：改 `app/core/search.py` 顶部的 `_SEARCH_WORDS`（直接搜索）和 `_LIVE_WORDS`（要配合疑问词）；模型的自主判断则靠 `app/core/persona.py` 里的 `SEARCH_TOOL_GUIDE`。
+
+## 链接解析
+
+群里有人转发 B 站视频或网页链接时，程序会在回复前先抓一份页面文字，放在【链接内容】里交给模型，让 AI 至少知道这个视频/网页在讲什么。
+
+- 支持范围：消息文字里的 `http/https` 链接，以及 QQ 分享卡片（json/xml）里的跳转地址；`b23.tv` 短链会先跟随跳转再解析。
+- B 站视频：调 B 站公开接口取标题、UP主、时长、播放/点赞、分区、发布日期、简介、标签、前几条热评和弹幕摘录。接口需要设备 Cookie（程序自动取 `buvid3`，不需要登录、不需要你自己的 Cookie）。
+- 普通网页：取标题、`description` 摘要和去掉标签后的正文摘录（正文最多约 500 字）。
+- 能力边界：**这只是页面上的文字，不是视频画面，也不是语音转文字**。没有字幕的视频只能靠标题、简介、评论和弹幕推断内容，AI 看不到画面，提示词也要求它别编造视频细节。
+- 花费与延迟：不产生额外费用（都是公开接口）；但每条带链接的消息会多等 1～2 秒，网络慢时接近 `LINK_PARSE_TIMEOUT`。每次最多解析 `LINK_PARSE_MAX_LINKS` 个链接。
+- 失败兜底：链接打不开、接口返回错误、内网地址都会被跳过，只写一条日志，聊天照常进行；抓不到内容时提示词要求它如实说没看到。
+- 不想用：在 `.env` 设 `LINK_PARSE_ENABLED=false` 并重启 `bigfish-bot`。
+- 安全：只允许 http/https 公网地址，`localhost`、`127.0.0.1`、`192.168.x.x` 等内网主机直接拒绝，避免群里发内网链接让服务器乱访问。
+
+## 语音
+
+两条独立的链路，可以分别开关：
+
+**听语音（语音转文字）**：别人发语音消息时，程序把语音文件下载下来（NapCat 给的是本地路径或 http 地址），silk 格式用 `pilk` 解码、amr 等格式用系统 `ffmpeg` 转成 wav，再发给硅基流动的 `FunAudioLLM/SenseVoiceSmall` 模型识别。识别结果以 `[语音转文字]：...` 的形式进入对话上下文，模型就能像看文字一样理解语音。
+
+- 需要 Key：在 [siliconflow.cn](https://siliconflow.cn) 注册后创建 API Key，填进 `.env` 的 `SILICONFLOW_API_KEY`。模型官方标价免费，但接口仍要求 Key；不填 Key 时机器人只会看到 `[语音]` 提示，听不到内容。
+- 隐私：语音内容会上传给硅基流动做识别，和图片发给 DeepSeek 是同一类行为；介意就把 `VOICE_ASR_ENABLED=false`。
+- 失败兜底：下载失败、转码失败、接口报错都只记日志，聊天照常；不会因为一条语音卡住。
+
+**自己说语音（文字转语音）**：
+
+- 模型会在需要时把 `[语音]` 放在回复开头（提示词要求它只在短句、撒娇、安慰、情绪明显时用，解释和清单仍用文字）。程序把标记去掉、把剩下的文字用 Edge TTS（音色 `VOICE_TTS_VOICE`，默认晓伊）合成 mp3，再通过 NapCat 以语音消息发出去。
+- 免费、无需 Key：Edge TTS 调的是微软 Edge 浏览器的在线语音接口；不保证 100% 长期稳定，失败时会自动改发文字，不会丢消息。
+- 长度限制：回复超过 `VOICE_TTS_MAX_CHARS`（默认 80 字）就不合成语音，直接发文字，避免念一长串。
+- 语音临时文件放在 `data/voice/`，启动时自动清理一天前的文件。
+- 不想用：`VOICE_TTS_ENABLED=false` 并重启 `bigfish-bot`。
+
+服务器需要额外装两样东西（部署脚本已包含）：
+
+```bash
+sudo apt-get install -y ffmpeg
+/opt/bigfish/.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple edge-tts pilk
+```
 
 ## 给家里人用，需要上云吗
 
@@ -184,6 +254,8 @@ ssh -N -L 6099:127.0.0.1:6099 admin@<服务器公网IP>
 保持这个窗口不关，浏览器打开 `http://127.0.0.1:6099/webui`，用 `journalctl -u napcat -n 50 --no-pager` 里打印的 token 登录，扫小号的码，然后在网络配置里新建反向 WebSocket：`ws://127.0.0.1:8080/onebot/v11/ws`，Token 与 `.env` 的 `ONEBOT_TOKEN` 一致。
 
 > 网络配置请一次写完整：改完要重启 NapCat 才生效，而重启会让 QQ 掉登录、必须重新扫码。`bigfish-bot` 重启则不影响登录，可以随时重启。
+>
+> 本实例已给 NapCat 加了 `-q 3772806982` 快速登录参数：启动时先用本地缓存的登录凭证自动登录，成功就不用扫码；只有腾讯判定凭证失效（日志出现「你的用户身份已失效」）时才会退回二维码。换号或重新装系统时，用 `sudo NAPCAT_QUICK_UIN=<QQ号> bash deploy/linux/install-1g.sh` 重新生成服务即可。
 
 ### 4. 检查
 
@@ -201,6 +273,37 @@ journalctl -u bigfish-bot -f
 - 试用到期会转计费，到期前在控制台续费或释放实例。
 - 数据只在 `/opt/bigfish/data/bot.db`；释放实例前先用 `scp` 拉下来备份。
 
+### 当前部署实例（运维速查）
+
+| 项 | 值 |
+|---|---|
+| 公网 IP | `8.148.83.1` |
+| SSH 用户 | `admin`（阿里云 Ubuntu 镜像默认用户，不是 root） |
+| 私钥 | `C:\Users\zack\.ssh\bigfish_deploy`（无密码短语，可直接用） |
+| 项目目录 | `/opt/bigfish` |
+| 数据文件 | `/opt/bigfish/data/bot.db` |
+| NapCat 目录 | `/home/bigfish/Napcat` |
+| 实例到期 | 2026-12-01（到期前续费或释放，否则转按量计费） |
+
+连接服务器：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bigfish_deploy" admin@8.148.83.1
+```
+
+常用运维命令（登录后在服务器上执行）：
+
+```bash
+sudo systemctl status bigfish-bot napcat     # 两个服务状态
+sudo journalctl -u bigfish-bot -f            # bot 实时日志
+sudo journalctl -u napcat -f                 # QQ 实时日志
+sudo systemctl restart bigfish-bot           # 只重启 bot，不影响 QQ 登录
+sudo systemctl restart napcat                # 已配快速登录，正常不用扫码
+free -h                                      # 内存占用
+```
+
+> 重启 `napcat` 一般会走 `-q` 快速登录，不用扫码；只有腾讯判定登录凭证失效时才需要重新扫码。重启 `bigfish-bot` 完全没有这个代价。初次部署踩过的坑见 [docs/部署踩坑记录.md](docs/部署踩坑记录.md)。
+
 ## 测试
 
 ```powershell
@@ -213,6 +316,10 @@ journalctl -u bigfish-bot -f
 - **启动后没有「NapCat 已连接」**：检查 NapCat 反向 WS 的 URL 是否 `ws://127.0.0.1:8080/onebot/v11/ws`、token 是否一致、本程序是否已在运行。
 - **能连上但群里 @ 没反应**：确认 NapCat 登录的是机器人小号，并且消息里是真正的 @（不是手打的「@大肥鱼」文字）。手打名字也能触发是别名功能。
 - **回复很慢或报错**：检查 `DEEPSEEK_API_KEY` 是否有效、账户余额是否充足；日志会打印具体原因。
+- **它什么时候会联网搜**：命中「搜一下/查一下/最新/新闻/天气/多少钱」等关键词，或「今天/最近 + 疑问词」时才会搜；普通闲聊不搜。可以在 `.env` 设 `WEB_SEARCH_ENABLED=false` 关闭。
+- **它能看懂 B 站视频吗**：只能看到标题、简介、标签、热评和弹幕文字，看不到画面；想让它讲视频细节，最好自己补一句「这个视频大概讲了什么」。
+- **它能听懂语音吗**：配置 `SILICONFLOW_API_KEY` 后可以；没配 Key 只会提示「[语音]」。语音识别和视频解析是两回事，B 站视频里的说话内容它仍然听不到。
+- **它发语音失败怎么办**：Edge TTS 偶尔会被微软接口限制，程序会自动改发文字；日志里会出现「语音合成失败」。
 - **为什么还会自动通过好友/入群**：程序不会调用审批接口，只记录日志。请按「好友与群邀请：只由你手动确认」检查小号 QQ 自身的隐私与加群设置。
 - **群聊每条都回，会不会太吵**：这是当前配置（`GROUP_REPLY_PROBABILITY=1`）；仍保留每分钟 60 条的安全上限。想安静一点就把概率调低或设为 0。
 - **发表情/图片它会怎么回**：交给模型理解后生成回复，不是固定文案；图片会上传 DeepSeek 识别。

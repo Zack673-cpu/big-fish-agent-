@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -16,6 +17,9 @@ _OTHER_LABELS = {
     "xml": "卡片",
     "forward": "聊天记录",
 }
+_CARD_URL_KEYS = ("jumpUrl", "qqdocurl", "source_url", "url")
+_HTTP_RE = re.compile(r"https?://[^\s<>\"'\u4e00-\u9fff]+", re.IGNORECASE)
+_XML_URL_RE = re.compile(r"<url>(.*?)</url>", re.IGNORECASE | re.S)
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,80 @@ class Attachment:
     kind: str
     label: str = ""
     url: str = ""
+
+
+def _decode_cq_value(text: str) -> str:
+    """还原 CQ 码里转义过的逗号、方括号和 &。"""
+    return (
+        text.replace("&#91;", "[")
+        .replace("&#93;", "]")
+        .replace("&#44;", ",")
+        .replace("&amp;", "&")
+    )
+
+
+def _first_url(text: str) -> str:
+    match = _HTTP_RE.search(text or "")
+    return match.group(0).rstrip(".,;:!?)]}>\"'") if match else ""
+
+
+def _json_card_url(raw: str) -> str:
+    """从分享卡片的 JSON 里找跳转链接，优先正式跳转字段。"""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return _first_url(raw)
+    preferred: list[str] = []
+    others: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str) and value.startswith(("http://", "https://")):
+                    if key in _CARD_URL_KEYS:
+                        preferred.append(value)
+                    else:
+                        others.append(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return preferred[0] if preferred else (others[0] if others else "")
+
+
+def _xml_card_url(raw: str) -> str:
+    """从 XML 卡片（如小程序、结构化分享）里找链接。"""
+    for match in _XML_URL_RE.finditer(raw):
+        value = _decode_cq_value(match.group(1)).strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    return _first_url(_decode_cq_value(raw))
+
+
+def _record_source(data: Dict[str, Any]) -> str:
+    """语音段优先用 http 地址，其次 NapCat 给的本地路径。"""
+    url = str(data.get("url") or "")
+    file = str(data.get("file") or "")
+    if not url and file.startswith(("http://", "https://")):
+        url = file
+    if url.startswith(("http://", "https://")):
+        return url
+    return str(data.get("path") or file or url)
+
+
+def _card_url(seg_type: str, data: Dict[str, Any]) -> str:
+    """取出卡片里的链接；不是卡片或没有链接时返回空串。"""
+    raw = data.get("data")
+    if not isinstance(raw, str) or not raw.strip():
+        raw = str(data.get("url") or "")
+        return _first_url(raw)
+    raw = _decode_cq_value(raw)
+    if seg_type == "json":
+        return _json_card_url(raw)
+    return _xml_card_url(raw)
 
 
 def _attachment(seg_type: str, data: Dict[str, Any]) -> Attachment:
@@ -45,6 +123,14 @@ def _attachment(seg_type: str, data: Dict[str, Any]) -> Attachment:
             or "未知表情"
         )
         return Attachment("face", label)
+    if seg_type == "record":
+        return Attachment("record", _OTHER_LABELS["record"], _record_source(data))
+    if seg_type in {"json", "xml"}:
+        return Attachment(
+            "other",
+            _OTHER_LABELS.get(seg_type, seg_type),
+            _card_url(seg_type, data),
+        )
     return Attachment("other", _OTHER_LABELS.get(seg_type, seg_type))
 
 
@@ -114,7 +200,8 @@ def _parse_cq(raw: str, self_id: int) -> Tuple[str, bool, bool, Tuple[Attachment
         cq_type = match.group(1)
         params = {}
         if match.group(2):
-            for item in match.group(2).split(","):
+            # 卡片 JSON 里可能带未转义的逗号，只在逗号后紧跟 key= 时才拆
+            for item in re.split(r",(?=[A-Za-z_]+=)", match.group(2)):
                 if "=" in item:
                     key, value = item.split("=", 1)
                     params[key] = value
@@ -125,13 +212,7 @@ def _parse_cq(raw: str, self_id: int) -> Tuple[str, bool, bool, Tuple[Attachment
             attachments.append(_attachment(cq_type, params))
         last = match.end()
     parts.append(raw[last:])
-    text = "".join(parts)
-    text = (
-        text.replace("&#91;", "[")
-        .replace("&#93;", "]")
-        .replace("&#44;", ",")
-        .replace("&amp;", "&")
-    )
+    text = _decode_cq_value("".join(parts))
     return text, at_me, has_media, tuple(attachments)
 
 

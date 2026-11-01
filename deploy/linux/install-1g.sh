@@ -15,6 +15,12 @@ SWAP_SIZE_MB="${SWAP_SIZE_MB:-2048}"
 PYPI_MIRROR="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 NAPCAT_PROXY="${NAPCAT_PROXY:-0}"
 NAPCAT_DIR="/home/${APP_USER}/Napcat"
+# 机器人 QQ 号：填了就在启动时用 -q 快速登录，省掉扫码；留空则每次启动都要扫码
+NAPCAT_QUICK_UIN="${NAPCAT_QUICK_UIN:-}"
+QUICK_LOGIN_ARG=""
+if [[ -n "${NAPCAT_QUICK_UIN}" ]]; then
+    QUICK_LOGIN_ARG=" -q ${NAPCAT_QUICK_UIN}"
+fi
 
 # 下载 install.sh 的地址：用加速站时把加速前缀拼到原始 URL 前面，直连则用原始地址
 if [[ "${NAPCAT_PROXY}" == "0" ]]; then
@@ -70,7 +76,7 @@ done
 say "3/6 安装系统依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates tar >/dev/null
+apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates tar ffmpeg >/dev/null
 ok "python3 $(python3 -V 2>&1 | awk '{print $2}') / venv / pip 就绪"
 
 # ---------- 4. 运行用户 ----------
@@ -202,7 +208,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=/home/${APP_USER}/Napcat
-ExecStart=/usr/bin/xvfb-run -a ${NAPCAT_DIR}/opt/QQ/qq --no-sandbox
+ExecStart=/usr/bin/xvfb-run -a ${NAPCAT_DIR}/opt/QQ/qq --no-sandbox${QUICK_LOGIN_ARG}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

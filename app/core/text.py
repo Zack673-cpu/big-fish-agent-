@@ -54,8 +54,21 @@ def _split_long(paragraph: str, max_chars: int) -> List[str]:
     return pieces
 
 
+def _cut_at_sentence(text: str, limit: int) -> str:
+    """在 limit 内尽量停在句末标点，实在没有标点才硬截。"""
+    for mark in _SEGMENT_PUNCT:
+        index = text.rfind(mark, 0, limit)
+        if index >= limit // 2:
+            return text[: index + 1].strip()
+    return text[:limit].rstrip() + "…"
+
+
 def split_text(text: str, max_chars: int, max_segments: int) -> List[str]:
-    """把回复切成最多 max_segments 段，每段不超过 max_chars 字。"""
+    """把回复切成最多 max_segments 段，每段不超过 max_chars 字。
+
+    超出的部分并进最后一段，避免把话说到一半就断掉；
+    只有明显超长（超过 3 倍单段上限）时才在句末截断。
+    """
     text = clean_text(text)
     if not text:
         return []
@@ -78,8 +91,8 @@ def split_text(text: str, max_chars: int, max_segments: int) -> List[str]:
     if len(segments) > max_segments:
         head = segments[: max_segments - 1]
         tail = " ".join(segments[max_segments - 1:])
-        if len(tail) > max_chars:
-            tail = tail[: max_chars - 1].rstrip() + "…"
+        if len(tail) > max_chars * 3:
+            tail = _cut_at_sentence(tail, max_chars * 3)
         head.append(tail)
         segments = head
     return segments

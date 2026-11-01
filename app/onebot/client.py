@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from starlette.websockets import WebSocket, WebSocketState
@@ -10,6 +11,14 @@ from starlette.websockets import WebSocket, WebSocketState
 
 class OneBotError(Exception):
     """OneBot 接口调用失败。"""
+
+
+def _record_file(file: str) -> str:
+    """本地路径转成 NapCat 认的 file:// 地址，其余形式原样传。"""
+    value = str(file or "")
+    if value.startswith(("http://", "https://", "file://", "base64://")):
+        return value
+    return Path(value).resolve().as_uri()
 
 
 class OneBotConnection:
@@ -63,6 +72,21 @@ class OneBotConnection:
         await self.call_action(
             "send_private_msg",
             {"user_id": user_id, "message": [{"type": "text", "data": {"text": text}}]},
+        )
+
+    async def send_group_record(
+        self, group_id: int, file: str, quote_message_id: Optional[int] = None
+    ) -> None:
+        message: List[Dict[str, Any]] = []
+        if quote_message_id:
+            message.append({"type": "reply", "data": {"id": str(quote_message_id)}})
+        message.append({"type": "record", "data": {"file": _record_file(file)}})
+        await self.call_action("send_group_msg", {"group_id": group_id, "message": message})
+
+    async def send_private_record(self, user_id: int, file: str) -> None:
+        await self.call_action(
+            "send_private_msg",
+            {"user_id": user_id, "message": [{"type": "record", "data": {"file": _record_file(file)}}]},
         )
 
     def close_pending(self, reason: str = "连接已关闭") -> None:
