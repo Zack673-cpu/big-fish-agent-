@@ -1,0 +1,18 @@
+# 环境与密钥
+.venv/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 运行数据与日志
+data/
+logs/
+*.log
+
+# 编辑器
+.vscode/
+.idea/
