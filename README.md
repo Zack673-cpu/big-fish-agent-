@@ -11,6 +11,7 @@
 - 需要时效信息时自动联网搜索（DeepSeek 官方 Search API，复用同一个 Key），普通闲聊不会乱搜
 - 消息里带 B 站或网页链接时自动抓取内容：B 站取标题、UP主、简介、标签、热评和弹幕，普通网页取标题和正文摘要，交给模型参考
 - 能听懂别人发的语音（硅基流动 SenseVoice 转文字），也能自己决定用语音回答（Edge TTS 合成，免费无需 Key）
+- 过年时有人发红包，会随机等几秒说句吉利话凑热闹（只发祝福，不抢钱、不发钱）
 - 按会话保存上下文，聊久了自动生成摘要，避免上下文越滚越大
 - `/remember` 长期记忆，`/reset` 清空当前会话上下文
 - 回复自动分段、限流，避免刷屏；大模型出错时有友好兜底
@@ -134,6 +135,10 @@ Copy-Item .env.example .env
 | `VOICE_TTS_VOICE` | zh-CN-XiaoyiNeural | 语音音色，默认「晓伊·温柔少女」 |
 | `VOICE_TTS_TIMEOUT` | 15 | 语音合成超时秒数，失败改发文字 |
 | `VOICE_TTS_MAX_CHARS` | 80 | 超过这个字数的回复不合成语音，直接发文字 |
+| `RED_PACKET_ENABLED` | true | 收到红包时是否发祝福凑热闹（不涉及钱） |
+| `RED_PACKET_DELAY_MIN` | 1 | 红包反应的最短随机延迟（秒） |
+| `RED_PACKET_DELAY_MAX` | 5 | 红包反应的最长随机延迟（秒） |
+| `RED_PACKET_COOLDOWN` | 30 | 同一会话两次红包反应的最小间隔（秒） |
 | `MAX_REPLY_CHARS` | 60 | 每段回复最大字数 |
 | `MAX_REPLY_SEGMENTS` | 3 | 一条回复最多分几段 |
 | `CONTEXT_MESSAGES` | 20 | 每次带给模型的历史消息条数 |
@@ -205,6 +210,16 @@ Copy-Item .env.example .env
 sudo apt-get install -y ffmpeg
 /opt/bigfish/.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple edge-tts pilk
 ```
+
+## 红包气氛（不碰钱）
+
+群里/私聊有人发红包时，机器人会在 `RED_PACKET_DELAY_MIN`～`RED_PACKET_DELAY_MAX` 秒内随机挑个时间，说一句吉利话（比如「恭喜发财，万事顺意」），只图热闹。
+
+- **不抢钱，也不发钱**：NapCat 没有领红包、发红包的接口，红包里的钱还是留给人抢。机器人说的话里也不声明金额，避免误以为它真抢到了。
+- 怎么识别红包：NapCat 遇到红包这类它不认识的消息元素时，会上报一条空消息（日志里写 `[未实现 (ElementType = 9)]`）。程序就把「空消息」当成红包来响应。
+- 副作用：其它 NapCat 不认识的消息元素（比如某些卡片）也会被当成红包，说一句祝福，不会有实际损失。
+- 防刷屏：同一会话 `RED_PACKET_COOLDOWN` 秒内只回应一次。
+- 不想用：`RED_PACKET_ENABLED=false` 并重启 `bigfish-bot`。
 
 ## 给家里人用，需要上云吗
 

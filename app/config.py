@@ -43,6 +43,11 @@ class Settings:
     voice_tts_timeout: float = 15.0
     voice_tts_max_chars: int = 80
 
+    red_packet_enabled: bool = True
+    red_packet_delay_min: float = 1.0
+    red_packet_delay_max: float = 5.0
+    red_packet_cooldown: float = 30.0
+
     onebot_host: str = "127.0.0.1"
     onebot_port: int = 8080
     onebot_path: str = "/onebot/v11/ws"
@@ -150,6 +155,10 @@ def load_settings() -> Settings:
         voice_tts_voice=_env("VOICE_TTS_VOICE") or defaults.voice_tts_voice,
         voice_tts_timeout=_env_float("VOICE_TTS_TIMEOUT", defaults.voice_tts_timeout),
         voice_tts_max_chars=_env_int("VOICE_TTS_MAX_CHARS", defaults.voice_tts_max_chars),
+        red_packet_enabled=_env_bool("RED_PACKET_ENABLED", defaults.red_packet_enabled),
+        red_packet_delay_min=_env_float("RED_PACKET_DELAY_MIN", defaults.red_packet_delay_min),
+        red_packet_delay_max=_env_float("RED_PACKET_DELAY_MAX", defaults.red_packet_delay_max),
+        red_packet_cooldown=_env_float("RED_PACKET_COOLDOWN", defaults.red_packet_cooldown),
         onebot_host=_env("ONEBOT_HOST") or defaults.onebot_host,
         onebot_port=_env_int("ONEBOT_PORT", defaults.onebot_port),
         onebot_path=_env("ONEBOT_PATH") or defaults.onebot_path,

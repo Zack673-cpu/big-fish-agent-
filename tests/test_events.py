@@ -161,3 +161,39 @@ def test_reply_segment_is_not_media():
     assert event is not None
     assert not event.has_media
     assert event.text == "你好"
+
+
+def test_empty_message_marks_unsupported():
+    """NapCat 遇到不认识的消息元素（红包）会给空数组和空 raw_message。"""
+    payload = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 9,
+        "user_id": 10005,
+        "group_id": 20002,
+        "self_id": 99999,
+        "raw_message": "",
+        "message": [],
+    }
+    event = parse_event(payload)
+    assert event is not None
+    assert event.unsupported
+    assert event.text == ""
+    assert event.attachments == ()
+
+
+def test_at_only_message_is_not_unsupported():
+    payload = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 10,
+        "user_id": 10006,
+        "group_id": 20002,
+        "self_id": 99999,
+        "raw_message": "",
+        "message": [{"type": "at", "data": {"qq": "99999"}}],
+    }
+    event = parse_event(payload)
+    assert event is not None
+    assert not event.unsupported
+    assert event.at_me

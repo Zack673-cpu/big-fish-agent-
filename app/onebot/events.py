@@ -149,6 +149,7 @@ class MessageEvent:
     at_me: bool
     has_media: bool
     attachments: Tuple[Attachment, ...] = ()
+    unsupported: bool = False
 
     @property
     def is_group(self) -> bool:
@@ -239,10 +240,14 @@ def parse_event(payload: Dict[str, Any]) -> Optional[MessageEvent]:
             return None
 
     message = payload.get("message", payload.get("raw_message", ""))
+    raw_message = str(payload.get("raw_message") or "")
     if isinstance(message, list):
         text, at_me, has_media, attachments = _parse_segments(message, self_id)
+        # NapCat 遇到不认识的消息元素（红包就是其一）会给空数组，只留一个空事件
+        unsupported = not message and not raw_message
     else:
         text, at_me, has_media, attachments = _parse_cq(str(message), self_id)
+        unsupported = not str(message).strip() and not raw_message
 
     sender = payload.get("sender") or {}
     sender_name = str(sender.get("card") or sender.get("nickname") or user_id)
@@ -264,4 +269,5 @@ def parse_event(payload: Dict[str, Any]) -> Optional[MessageEvent]:
         at_me=at_me,
         has_media=has_media,
         attachments=attachments,
+        unsupported=unsupported,
     )

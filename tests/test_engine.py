@@ -3,7 +3,7 @@ import dataclasses
 import json
 
 from app.config import Settings
-from app.core.engine import Engine
+from app.core.engine import Engine, _RED_PACKET_REPLIES
 from app.core.llm import LLMError
 from app.core.memory import MemoryStore
 from app.core.search import SearchResult
@@ -136,6 +136,7 @@ def make_event(
     sender_name: str = "小明",
     has_media: bool = False,
     attachments: tuple = (),
+    unsupported: bool = False,
 ) -> MessageEvent:
     return MessageEvent(
         message_type=message_type,
@@ -149,14 +150,15 @@ def make_event(
         at_me=at_me,
         has_media=has_media,
         attachments=attachments,
+        unsupported=unsupported,
     )
 
 
-async def prepare(tmp_path, llm=None, search=None, voice=None):
+async def prepare(tmp_path, llm=None, search=None, voice=None, settings=None):
     llm = llm or FakeLLM()
     memory = MemoryStore(tmp_path / "bot.db")
     await memory.initialize()
-    engine = Engine(make_settings(), memory, llm, search, voice=voice)
+    engine = Engine(settings or make_settings(), memory, llm, search, voice=voice)
     return memory, engine, llm
 
 
@@ -708,3 +710,83 @@ async def _poke_self_is_ignored(tmp_path):
 
     assert llm.calls == 0
     assert sender.sent == []
+
+
+def make_red_packet_settings(**kwargs) -> Settings:
+    """红包用例默认把延迟设为 0，测试不用真的等几秒。"""
+    values = {"red_packet_delay_min": 0.0, "red_packet_delay_max": 0.0}
+    values.update(kwargs)
+    return dataclasses.replace(make_settings(), **values)
+
+
+def test_red_packet_gets_festive_reply(tmp_path):
+    asyncio.run(_red_packet_gets_festive_reply(tmp_path))
+
+
+async def _red_packet_gets_festive_reply(tmp_path):
+    memory, engine, llm = await prepare(tmp_path, settings=make_red_packet_settings())
+    sender = FakeSender()
+
+    await engine.handle(
+        make_event(text="", message_type="group", group_id=12345, unsupported=True),
+        sender,
+    )
+
+    assert len(sender.sent) == 1
+    kind, group_id, text, quote = sender.sent[0]
+    assert kind == "group" and group_id == 12345 and quote is None
+    assert text in _RED_PACKET_REPLIES
+    assert llm.calls == 0
+
+
+def test_red_packet_private_also_replies(tmp_path):
+    asyncio.run(_red_packet_private_also_replies(tmp_path))
+
+
+async def _red_packet_private_also_replies(tmp_path):
+    memory, engine, llm = await prepare(tmp_path, settings=make_red_packet_settings())
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="", unsupported=True), sender)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0][0] == "private"
+    assert sender.sent[0][2] in _RED_PACKET_REPLIES
+
+
+def test_red_packet_cooldown_ignores_second(tmp_path):
+    asyncio.run(_red_packet_cooldown_ignores_second(tmp_path))
+
+
+async def _red_packet_cooldown_ignores_second(tmp_path):
+    memory, engine, llm = await prepare(
+        tmp_path, settings=make_red_packet_settings(red_packet_cooldown=60.0)
+    )
+    sender = FakeSender()
+
+    for _ in range(2):
+        await engine.handle(
+            make_event(text="", message_type="group", group_id=12345, unsupported=True),
+            sender,
+        )
+
+    assert len(sender.sent) == 1
+
+
+def test_red_packet_disabled_does_not_reply(tmp_path):
+    asyncio.run(_red_packet_disabled_does_not_reply(tmp_path))
+
+
+async def _red_packet_disabled_does_not_reply(tmp_path):
+    memory, engine, llm = await prepare(
+        tmp_path, settings=make_red_packet_settings(red_packet_enabled=False)
+    )
+    sender = FakeSender()
+
+    await engine.handle(
+        make_event(text="", message_type="group", group_id=12345, unsupported=True),
+        sender,
+    )
+
+    assert sender.sent == []
+    assert llm.calls == 0

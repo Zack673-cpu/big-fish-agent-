@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import time
 from typing import Any, Dict, List, Protocol, Set
 
 from ..config import Settings
@@ -41,6 +43,13 @@ _SEARCH_TOOL: Dict[str, Any] = {
     },
 }
 _MAX_TOOL_CALLS = 2
+
+# 红包气氛：不一定真抢到，只图个热闹，所以不声明金额
+_RED_PACKET_REPLIES = (
+    "咦，红包的气息～谢谢老板，新年快乐！",
+    "恭喜发财，万事顺意，新年快乐呀～",
+    "红包一响，好运登场，新年快乐！",
+)
 
 
 def _tool_query(call: Dict[str, Any]) -> str:
@@ -97,6 +106,7 @@ class Engine:
         self._chat_locks: Dict[str, asyncio.Lock] = {}
         self._summary_locks: Dict[str, asyncio.Lock] = {}
         self._summary_tasks: Set[asyncio.Task] = set()
+        self._red_packet_last: Dict[str, float] = {}
 
     async def handle(self, event, sender: MessageSender) -> None:
         """处理一条已经解析好的消息事件。"""
@@ -108,6 +118,10 @@ class Engine:
 
         # 群聊里没点名的斜杠文本不当指令，也不打扰别人
         if event.is_group and not (event.at_me or alias_hit) and text.startswith("/"):
+            return
+
+        if event.unsupported:
+            await self._react_red_packet(sender, event)
             return
 
         if event.is_private or event.at_me or alias_hit:
@@ -430,6 +444,22 @@ class Engine:
             lock = asyncio.Lock()
             self._chat_locks[chat_key] = lock
         return lock
+
+    async def _react_red_packet(self, sender: MessageSender, event) -> None:
+        """收到红包（NapCat 把它丢弃成空消息）时，随机等几秒说句吉利话。"""
+        if not self._settings.red_packet_enabled:
+            return
+        now = time.monotonic()
+        last = self._red_packet_last.get(event.chat_key, 0.0)
+        if now - last < self._settings.red_packet_cooldown:
+            return
+        self._red_packet_last[event.chat_key] = now
+        low = max(0.0, min(self._settings.red_packet_delay_min, self._settings.red_packet_delay_max))
+        high = max(low, self._settings.red_packet_delay_max, 0.0)
+        delay = random.uniform(low, high)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self._send(sender, event, random.choice(_RED_PACKET_REPLIES), quote=False)
 
     async def _send(self, sender: MessageSender, event, text: str, *, quote: bool) -> None:
         if not text:
