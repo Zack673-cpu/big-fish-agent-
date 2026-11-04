@@ -1,0 +1,13 @@
+[Unit]
+Description=NapCat 二维码登录失败守护（连续失败自动停止 napcat）
+After=systemd-journald.service
+
+[Service]
+Type=simple
+Environment=NAPCAT_QR_FAIL_LIMIT=3
+ExecStart=/usr/local/bin/napcat-qr-guard.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

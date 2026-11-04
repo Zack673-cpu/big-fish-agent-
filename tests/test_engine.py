@@ -119,9 +119,12 @@ class FakeSender:
 def make_settings() -> Settings:
     return dataclasses.replace(
         Settings(),
+        admin_qq=10001,
         rate_min_interval=0.0,
         rate_per_minute=1000,
         group_reply_probability=0.0,
+        segment_delay_min=0.0,
+        segment_delay_max=0.0,
     )
 
 
@@ -160,6 +163,46 @@ async def prepare(tmp_path, llm=None, search=None, voice=None, settings=None):
     await memory.initialize()
     engine = Engine(settings or make_settings(), memory, llm, search, voice=voice)
     return memory, engine, llm
+
+
+def test_owner_private_message_notifies_activity(tmp_path):
+    asyncio.run(_owner_private_message_notifies_activity(tmp_path))
+
+
+async def _owner_private_message_notifies_activity(tmp_path):
+    memory, engine, llm = await prepare(tmp_path)
+    hits: list = []
+    engine.set_activity_listener(lambda: hits.append("hit"))
+    sender = FakeSender()
+
+    await engine.handle(make_event(text="/help"), sender)
+    assert hits == ["hit"]
+
+    await engine.handle(make_event(text="你好", user_id=12345), sender)
+    assert hits == ["hit"]
+
+    await engine.handle(
+        make_event(text="大肥鱼在吗", message_type="group", group_id=20001, user_id=10001),
+        sender,
+    )
+    assert hits == ["hit"]
+
+
+def test_owner_private_poke_notifies_activity(tmp_path):
+    asyncio.run(_owner_private_poke_notifies_activity(tmp_path))
+
+
+async def _owner_private_poke_notifies_activity(tmp_path):
+    memory, engine, llm = await prepare(tmp_path)
+    hits: list = []
+    engine.set_activity_listener(lambda: hits.append("hit"))
+    sender = FakeSender()
+
+    await engine.handle_poke(poke_payload(), sender)
+    assert hits == ["hit"]
+
+    await engine.handle_poke(poke_payload(group_id=20001), sender)
+    assert hits == ["hit"]
 
 
 def test_private_message_replies_and_stores(tmp_path):
@@ -334,7 +377,7 @@ async def _knowledge_injected_into_system_prompt(tmp_path):
     kb_path = tmp_path / "kb.md"
     kb_path.write_text("## 小伊卡\n\n天马小伊卡是风堇的伙伴。\n", encoding="utf-8")
     settings = dataclasses.replace(
-        make_settings(), knowledge_file=kb_path, knowledge_top_k=1
+        make_settings(), knowledge_path=kb_path, knowledge_top_k=1
     )
     llm = FakeLLM()
     memory = MemoryStore(tmp_path / "bot.db")

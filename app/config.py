@@ -29,6 +29,9 @@ class Settings:
     web_search_count: int = 3
     web_search_timeout: float = 15.0
 
+    weather_enabled: bool = True
+    weather_timeout: float = 10.0
+
     link_parse_enabled: bool = True
     link_parse_timeout: float = 10.0
     link_parse_max_links: int = 2
@@ -48,6 +51,13 @@ class Settings:
     red_packet_delay_max: float = 5.0
     red_packet_cooldown: float = 30.0
 
+    proactive_enabled: bool = True
+    proactive_interval_minutes: int = 20
+    proactive_interval_max_minutes: int = 120
+    proactive_start_hour: int = 8
+    proactive_end_hour: int = 23
+    proactive_utc_offset: float = 8.0
+
     onebot_host: str = "127.0.0.1"
     onebot_port: int = 8080
     onebot_path: str = "/onebot/v11/ws"
@@ -55,6 +65,8 @@ class Settings:
 
     max_reply_chars: int = 60
     max_reply_segments: int = 3
+    segment_delay_min: float = 3.0
+    segment_delay_max: float = 5.0
     context_messages: int = 20
     summary_trigger: int = 40
 
@@ -63,8 +75,16 @@ class Settings:
     group_reply_probability: float = 1.0
     group_cooldown: float = 0.0
 
-    knowledge_file: Path = BASE_DIR / "knowledge" / "hyacine.md"
+    knowledge_path: Path = BASE_DIR / "knowledge"
+    knowledge_index_dir: Path = BASE_DIR / "data" / "knowledge_index"
     knowledge_top_k: int = 2
+    embedding_enabled: bool = True
+    embedding_api_key: str = ""
+    embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimensions: int = 1024
+    embedding_timeout: float = 20.0
+    embedding_min_score: float = 0.40
 
     quote_reply: bool = True
     data_dir: Path = BASE_DIR / "data"
@@ -132,6 +152,7 @@ def load_settings() -> Settings:
     """读取 .env（不覆盖已有环境变量），返回配置对象。"""
     load_dotenv(BASE_DIR / ".env", override=False)
     defaults = Settings()
+    data_dir = _env_path("DATA_DIR", defaults.data_dir)
     return Settings(
         bot_name=_env("BOT_NAME") or defaults.bot_name,
         aliases=_env_aliases(defaults.aliases),
@@ -143,6 +164,8 @@ def load_settings() -> Settings:
         web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", defaults.web_search_enabled),
         web_search_count=_env_int("WEB_SEARCH_COUNT", defaults.web_search_count),
         web_search_timeout=_env_float("WEB_SEARCH_TIMEOUT", defaults.web_search_timeout),
+        weather_enabled=_env_bool("WEATHER_ENABLED", defaults.weather_enabled),
+        weather_timeout=_env_float("WEATHER_TIMEOUT", defaults.weather_timeout),
         link_parse_enabled=_env_bool("LINK_PARSE_ENABLED", defaults.link_parse_enabled),
         link_parse_timeout=_env_float("LINK_PARSE_TIMEOUT", defaults.link_parse_timeout),
         link_parse_max_links=_env_int("LINK_PARSE_MAX_LINKS", defaults.link_parse_max_links),
@@ -159,21 +182,47 @@ def load_settings() -> Settings:
         red_packet_delay_min=_env_float("RED_PACKET_DELAY_MIN", defaults.red_packet_delay_min),
         red_packet_delay_max=_env_float("RED_PACKET_DELAY_MAX", defaults.red_packet_delay_max),
         red_packet_cooldown=_env_float("RED_PACKET_COOLDOWN", defaults.red_packet_cooldown),
+        proactive_enabled=_env_bool("PROACTIVE_ENABLED", defaults.proactive_enabled),
+        proactive_interval_minutes=_env_int(
+            "PROACTIVE_INTERVAL_MINUTES", defaults.proactive_interval_minutes
+        ),
+        proactive_interval_max_minutes=_env_int(
+            "PROACTIVE_INTERVAL_MAX_MINUTES", defaults.proactive_interval_max_minutes
+        ),
+        proactive_start_hour=_env_int("PROACTIVE_START_HOUR", defaults.proactive_start_hour),
+        proactive_end_hour=_env_int("PROACTIVE_END_HOUR", defaults.proactive_end_hour),
+        proactive_utc_offset=_env_float("PROACTIVE_UTC_OFFSET", defaults.proactive_utc_offset),
         onebot_host=_env("ONEBOT_HOST") or defaults.onebot_host,
         onebot_port=_env_int("ONEBOT_PORT", defaults.onebot_port),
         onebot_path=_env("ONEBOT_PATH") or defaults.onebot_path,
         onebot_token=_env("ONEBOT_TOKEN"),
         max_reply_chars=_env_int("MAX_REPLY_CHARS", defaults.max_reply_chars),
         max_reply_segments=_env_int("MAX_REPLY_SEGMENTS", defaults.max_reply_segments),
+        segment_delay_min=_env_float("SEGMENT_DELAY_MIN", defaults.segment_delay_min),
+        segment_delay_max=_env_float("SEGMENT_DELAY_MAX", defaults.segment_delay_max),
         context_messages=_env_int("CONTEXT_MESSAGES", defaults.context_messages),
         summary_trigger=_env_int("SUMMARY_TRIGGER", defaults.summary_trigger),
         rate_min_interval=_env_float("RATE_MIN_INTERVAL", defaults.rate_min_interval),
         rate_per_minute=_env_int("RATE_PER_MINUTE", defaults.rate_per_minute),
         group_reply_probability=_env_float("GROUP_REPLY_PROBABILITY", defaults.group_reply_probability),
         group_cooldown=_env_float("GROUP_COOLDOWN", defaults.group_cooldown),
-        knowledge_file=_env_path("KNOWLEDGE_FILE", defaults.knowledge_file),
+        knowledge_path=_env_path(
+            "KNOWLEDGE_PATH",
+            _env_path("KNOWLEDGE_FILE", defaults.knowledge_path),
+        ),
+        knowledge_index_dir=_env_path(
+            "KNOWLEDGE_INDEX_DIR",
+            data_dir / "knowledge_index",
+        ),
         knowledge_top_k=_env_int("KNOWLEDGE_TOP_K", defaults.knowledge_top_k),
+        embedding_enabled=_env_bool("EMBEDDING_ENABLED", defaults.embedding_enabled),
+        embedding_api_key=_env("DASHSCOPE_API_KEY"),
+        embedding_base_url=_env("EMBEDDING_BASE_URL") or defaults.embedding_base_url,
+        embedding_model=_env("EMBEDDING_MODEL") or defaults.embedding_model,
+        embedding_dimensions=_env_int("EMBEDDING_DIMENSIONS", defaults.embedding_dimensions),
+        embedding_timeout=_env_float("EMBEDDING_TIMEOUT", defaults.embedding_timeout),
+        embedding_min_score=_env_float("EMBEDDING_MIN_SCORE", defaults.embedding_min_score),
         quote_reply=_env_bool("QUOTE_REPLY", defaults.quote_reply),
-        data_dir=_env_path("DATA_DIR", defaults.data_dir),
+        data_dir=data_dir,
         log_level=(_env("LOG_LEVEL") or defaults.log_level).upper(),
     )

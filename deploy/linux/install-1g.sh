@@ -76,7 +76,7 @@ done
 say "3/6 安装系统依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates tar ffmpeg >/dev/null
+apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates tar ffmpeg libgomp1 >/dev/null
 ok "python3 $(python3 -V 2>&1 | awk '{print $2}') / venv / pip 就绪"
 
 # ---------- 4. 运行用户 ----------
@@ -147,7 +147,7 @@ GROUP_REPLY_PROBABILITY=1
 GROUP_COOLDOWN=0
 QUOTE_REPLY=true
 
-KNOWLEDGE_FILE=knowledge/hyacine.md
+KNOWLEDGE_PATH=knowledge
 KNOWLEDGE_TOP_K=2
 
 DATA_DIR=data

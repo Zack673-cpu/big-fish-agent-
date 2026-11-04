@@ -7,10 +7,11 @@ import json
 import logging
 import random
 import time
-from typing import Any, Dict, List, Protocol, Set
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set
 
 from ..config import Settings
 from . import commands
+from .embeddings import BailianEmbeddings
 from .knowledge import KnowledgeBase
 from .link import LinkReader, extract_links
 from .llm import LLMClient, LLMError
@@ -21,6 +22,7 @@ from .search import WebSearchClient, format_search_context, needs_search
 from .text import clean_text, contains_alias, remove_aliases, split_text
 from .trigger import RateLimiter, Trigger
 from .voice import VoiceService, pop_voice_marker
+from .weather import WeatherClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,27 @@ _SEARCH_TOOL: Dict[str, Any] = {
                 }
             },
             "required": ["query"],
+        },
+    },
+}
+# 交给模型的天气工具：走结构化预报，避免拿网页旧数据回答
+_WEATHER_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": (
+            "查询中国城市未来 3 天的天气预报（天气现象、最高/最低气温、降水概率）。"
+            "对方问天气、气温、下雨、带伞或穿什么时优先调用，不要用 web_search 查天气。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "常见中文城市名，如武汉、北京；不要带区县、湖泊或景点名",
+                }
+            },
+            "required": ["city"],
         },
     },
 }
@@ -61,6 +84,25 @@ def _tool_query(call: Dict[str, Any]) -> str:
     if not isinstance(args, dict):
         return ""
     return str(args.get("query") or "").strip()
+
+
+def _tool_name(call: Dict[str, Any]) -> str:
+    """取出 tool_call 的工具名；格式不对就返回空。"""
+    try:
+        return str(call["function"]["name"] or "")
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def _tool_city(call: Dict[str, Any]) -> str:
+    """从天气 tool_call 里取出城市名。"""
+    try:
+        args = json.loads(call["function"]["arguments"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("city") or "").strip()[:40]
 
 SUMMARY_SYSTEM_PROMPT = """你在为一段 QQ 聊天整理“剧情摘要”，供后续聊天参考。请把旧摘要和新对话合并成一段不超过 400 字的中文摘要，保留：聊天对象的关键信息（昵称、喜好、计划）、聊过的重要话题和结论、还没完成的事。去掉寒暄和重复内容。只输出摘要正文，不要标题、列表符号或解释。"""
 
@@ -90,6 +132,7 @@ class Engine:
         search: WebSearchClient | None = None,
         links: LinkReader | None = None,
         voice: VoiceService | None = None,
+        weather: WeatherClient | None = None,
     ) -> None:
         self._settings = settings
         self._memory = memory
@@ -97,7 +140,22 @@ class Engine:
         self._search = search
         self._links = links
         self._voice = voice
-        self._knowledge = KnowledgeBase(settings.knowledge_file)
+        self._weather = weather
+        embedder = None
+        if settings.embedding_enabled and settings.embedding_api_key:
+            embedder = BailianEmbeddings(
+                settings.embedding_api_key,
+                settings.embedding_base_url,
+                settings.embedding_model,
+                settings.embedding_dimensions,
+                settings.embedding_timeout,
+            )
+        self._knowledge = KnowledgeBase(
+            settings.knowledge_path,
+            embedder=embedder,
+            index_dir=settings.knowledge_index_dir,
+            embedding_min_score=settings.embedding_min_score,
+        )
         self._trigger = Trigger(
             RateLimiter(settings.rate_min_interval, settings.rate_per_minute),
             settings.group_reply_probability,
@@ -107,9 +165,38 @@ class Engine:
         self._summary_locks: Dict[str, asyncio.Lock] = {}
         self._summary_tasks: Set[asyncio.Task] = set()
         self._red_packet_last: Dict[str, float] = {}
+        self._last_send_at: Dict[str, float] = {}
+        self._activity_listener: Optional[Callable[[], None]] = None
+
+    def set_activity_listener(self, listener: Callable[[], None]) -> None:
+        """注册号主互动的回调，用于重置主动消息计时。"""
+        self._activity_listener = listener
+
+    async def start(self) -> None:
+        """启动时检查语料索引；需要重建时在后台执行，不阻塞机器人上线。"""
+        await self._knowledge.start()
+
+    async def aclose(self) -> None:
+        """停止索引任务并关闭知识库持有的网络客户端。"""
+        await self._knowledge.aclose()
+
+    def _notify_activity(self) -> None:
+        if self._activity_listener is None:
+            return
+        try:
+            self._activity_listener()
+        except Exception as exc:  # 回调失败不能影响正常聊天
+            logger.warning("重置主动消息计时失败：%s", exc)
+
+    def _note_activity(self, event) -> None:
+        """号主私聊发消息时通知主动消息任务重新计时。"""
+        if not event.is_private or event.user_id != self._settings.admin_qq:
+            return
+        self._notify_activity()
 
     async def handle(self, event, sender: MessageSender) -> None:
         """处理一条已经解析好的消息事件。"""
+        self._note_activity(event)
         chat_key = event.chat_key
         text = clean_text(event.text)
         alias_hit = contains_alias(text, self._settings.aliases)
@@ -153,7 +240,9 @@ class Engine:
                 await self._send(sender, event, "我在呀，怎么啦~", quote=True)
             return
 
-        knowledge = self._knowledge.retrieve(text, self._settings.knowledge_top_k)
+        knowledge = await self._knowledge.retrieve(
+            text, self._settings.knowledge_top_k
+        )
         transcript = await self._transcribe(event.attachments)
         history_text = self._compose_history_text(event, text, transcript)
         link_context = await self._read_links(text, event.attachments)
@@ -176,6 +265,7 @@ class Engine:
                         memories=memories,
                         knowledge=knowledge,
                         search_tool=self._search is not None,
+                        weather_tool=self._weather is not None,
                         link_context=bool(link_context),
                         voice_reply=self._voice is not None and self._voice.tts_enabled,
                         max_segments=self._settings.max_reply_segments,
@@ -215,26 +305,34 @@ class Engine:
                 self._schedule_summary(chat_key)
 
     async def _answer(self, prompt: List[Dict[str, Any]], text: str) -> str:
-        """让模型决定要不要联网：需要就搜一次再答。"""
-        if self._search is None:
+        """让模型按需调用搜索或天气工具，再生成最终回复。"""
+        tools: List[Dict[str, Any]] = []
+        if self._search is not None:
+            tools.append(_SEARCH_TOOL)
+        if self._weather is not None:
+            tools.append(_WEATHER_TOOL)
+        if not tools:
             return await self._llm.chat(prompt)
         try:
-            message = await self._llm.request(prompt, tools=[_SEARCH_TOOL])
+            message = await self._llm.request(prompt, tools=tools)
         except LLMError as exc:  # 模型或网关不支持工具时，退回关键词判断
+            if self._search is None:
+                logger.warning("工具调用不可用，直接聊天：%s", exc)
+                return await self._llm.chat(prompt)
             logger.warning("联网搜索工具不可用，改用关键词判断：%s", exc)
             return await self._chat_with_keywords(prompt, text)
         calls = message.get("tool_calls") or []
         if not calls:
             return str(message.get("content") or "").strip()
-        return await self._answer_with_search(prompt, message, calls)
+        return await self._answer_with_tools(prompt, message, calls)
 
-    async def _answer_with_search(
+    async def _answer_with_tools(
         self,
         prompt: List[Dict[str, Any]],
         message: Dict[str, Any],
         calls: List[Dict[str, Any]],
     ) -> str:
-        """执行模型要求的搜索，把结果交给模型生成最终回复。"""
+        """执行模型要求的工具调用，把结果交给模型生成最终回复。"""
         follow: List[Dict[str, Any]] = list(prompt)
         assistant: Dict[str, Any] = {
             "role": "assistant",
@@ -245,22 +343,52 @@ class Engine:
             assistant["reasoning_content"] = message["reasoning_content"]
         follow.append(assistant)
         for index, call in enumerate(calls):
-            query = _tool_query(call) if index < _MAX_TOOL_CALLS else ""
-            results = []
-            if query:
-                try:
-                    results = await self._search.search(query)
-                except Exception as exc:  # 搜索失败不能影响正常聊天
-                    logger.warning("联网搜索异常：%s", exc)
-                    results = []
+            content = await self._run_tool(call, index)
             follow.append(
                 {
                     "role": "tool",
                     "tool_call_id": str(call.get("id") or ""),
-                    "content": format_search_context(results) or "没有搜到可用的结果。",
+                    "content": content,
                 }
             )
         return await self._llm.chat(follow)
+
+    async def _run_tool(self, call: Dict[str, Any], index: int) -> str:
+        """按工具名分发；次数用完后不再执行外部请求。"""
+        if index >= _MAX_TOOL_CALLS:
+            return "工具调用次数已用完。"
+        name = _tool_name(call)
+        if name == "get_weather":
+            return await self._weather_context(call)
+        if name == "web_search":
+            return await self._search_context(call)
+        return "未知工具。"
+
+    async def _weather_context(self, call: Dict[str, Any]) -> str:
+        if self._weather is None:
+            return "天气工具不可用。"
+        city = _tool_city(call)
+        if not city:
+            return "没有提供城市名。"
+        try:
+            report = await self._weather.forecast(city)
+        except Exception as exc:  # 天气查询失败不能影响正常聊天
+            logger.warning("天气查询异常：%s", exc)
+            report = None
+        if report is None:
+            return f"没有查到「{city}」的天气数据。"
+        return report.format_context()
+
+    async def _search_context(self, call: Dict[str, Any]) -> str:
+        query = _tool_query(call)
+        results = []
+        if query and self._search is not None:
+            try:
+                results = await self._search.search(query)
+            except Exception as exc:  # 搜索失败不能影响正常聊天
+                logger.warning("联网搜索异常：%s", exc)
+                results = []
+        return format_search_context(results) or "没有搜到可用的结果。"
 
     async def _chat_with_keywords(
         self, prompt: List[Dict[str, Any]], text: str
@@ -327,6 +455,7 @@ class Engine:
             return False
         if not path:
             return False
+        await self._wait_before_send(event.chat_key)
         quote = self._settings.quote_reply
         try:
             if event.is_group:
@@ -388,6 +517,9 @@ class Engine:
         except (TypeError, ValueError):
             return
 
+        if group_id is None and user_id == self._settings.admin_qq:
+            self._notify_activity()
+
         if not self._trigger.allow(chat_key):
             return
 
@@ -431,6 +563,7 @@ class Engine:
         )
         try:
             for segment in segments:
+                await self._wait_before_send(chat_key)
                 if group_id is not None:
                     await sender.send_group_msg(group_id, segment)
                 else:
@@ -461,13 +594,26 @@ class Engine:
             await asyncio.sleep(delay)
         await self._send(sender, event, random.choice(_RED_PACKET_REPLIES), quote=False)
 
+    async def _wait_before_send(self, chat_key: str) -> None:
+        """同一会话相邻两条消息随机间隔几秒，避免连发被判定为机器人。"""
+        low = max(0.0, self._settings.segment_delay_min)
+        high = max(low, self._settings.segment_delay_max)
+        delay = random.uniform(low, high)
+        last = self._last_send_at.get(chat_key)
+        if last is not None:
+            remaining = delay - (time.monotonic() - last)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        self._last_send_at[chat_key] = time.monotonic()
+
     async def _send(self, sender: MessageSender, event, text: str, *, quote: bool) -> None:
         if not text:
             return
+        if event.is_group and event.group_id is None:
+            return
+        await self._wait_before_send(event.chat_key)
         try:
             if event.is_group:
-                if event.group_id is None:
-                    return
                 quote_id = event.message_id if quote and self._settings.quote_reply else None
                 await sender.send_group_msg(event.group_id, text, quote_message_id=quote_id)
             else:
