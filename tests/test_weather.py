@@ -1,7 +1,7 @@
 """天气模块：解析、格式化和工具分发。"""
 
 import asyncio
-from datetime import date
+from datetime import date, datetime
 
 from app.config import Settings
 from app.core.engine import Engine
@@ -67,7 +67,15 @@ def test_system_prompt_has_weather_guide_and_time() -> None:
     assert "城市级" in prompt
 
 
-def test_engine_dispatches_weather_tool() -> None:
+def test_engine_dispatches_weather_tool(monkeypatch) -> None:
+    # 工具链路内部用“真实今天”贴日期标签，测试里固定成数据对应的日期，避免随时间失效
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 4, 9, 0, tzinfo=tz)
+
+    monkeypatch.setattr("app.core.weather.datetime", _FixedDatetime)
+
     report = parse_forecast(_payload(), "武汉", "湖北省")
     weather = _FakeWeather(report)
     engine = Engine(Settings(), memory=None, llm=None, weather=weather)
